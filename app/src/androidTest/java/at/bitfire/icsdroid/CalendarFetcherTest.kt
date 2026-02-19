@@ -18,10 +18,14 @@ import io.ktor.http.headers
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import at.bitfire.ical4android.Event
 import java.io.IOException
 import java.io.InputStream
+import java.io.InputStreamReader
 import java.util.LinkedList
 
 class CalendarFetcherTest {
@@ -60,6 +64,73 @@ class CalendarFetcherTest {
             val referenceData = streamCorrect.bufferedReader().use { it.readText() }
             assertEquals(referenceData, ical)
         }
+    }
+
+    /**
+     * Tests parsing of a real-world ICS file from Chaostreff Osnabrück that contains:
+     * - 42 VEVENTs in total
+     * - Recurring events with RRULE (FREQ=WEEKLY, FREQ=MONTHLY with BYSETPOS)
+     * - EXDATE exclusions
+     * - Long DESCRIPTION and X-ALT-DESC properties with HTML
+     * - Various date formats (DTSTART with TZID and VALUE=DATE)
+     *
+     * This test was created to investigate an issue where only one event per month
+     * was shown for each month, possibly related to BYSETPOS handling.
+     *
+     * @see <a href="https://chaostreff-osnabrueck.de/de/calendar.ics">Source calendar</a>
+     */
+    @Test
+    fun testFetchLocal_chaostreffOsnabrueck_readsCorrectly() {
+        val uri = Uri.parse("${ContentResolver.SCHEME_ANDROID_RESOURCE}://${BuildConfig.APPLICATION_ID}/${R.raw.chaostreff_osnabrueck}")
+
+        var ical: String? = null
+        val fetcher = object: CalendarFetcher(appContext, uri, client) {
+            override suspend fun onSuccess(data: InputStream, contentType: ContentType?, eTag: String?, lastModified: Long?, displayName: String?) {
+                ical = data.bufferedReader().use { it.readText() }
+            }
+        }
+        runBlocking {
+            fetcher.fetch()
+        }
+
+        // Verify the file was read correctly
+        testContext.resources.openRawResource(R.raw.chaostreff_osnabrueck).use { streamCorrect ->
+            val referenceData = streamCorrect.bufferedReader().use { it.readText() }
+            assertEquals(referenceData, ical)
+        }
+
+        // Parse events and verify count
+        val events = testContext.resources.openRawResource(R.raw.chaostreff_osnabrueck).use { stream ->
+            Event.eventsFromReader(InputStreamReader(stream))
+        }
+        assertEquals("Expected 42 events in Chaostreff Osnabrück calendar", 42, events.size)
+
+        // Verify recurring events are parsed with their RRULEs
+        val eventsByUid = events.associateBy { it.uid }
+
+        // Weekly recurring event (2024/2025)
+        val weeklyEvent = eventsByUid["regular-chaostreff"]
+        assertNotNull("Weekly recurring event 'regular-chaostreff' should be present", weeklyEvent)
+        assertTrue(
+            "Weekly event should have RRULE with FREQ=WEEKLY",
+            weeklyEvent!!.rRules.any { it.value.contains("FREQ=WEEKLY") }
+        )
+
+        // Monthly recurring event with BYSETPOS=1,3,4,5 (2026)
+        val monthlyEvent = eventsByUid["regular-chaostreff-2026"]
+        assertNotNull("Monthly recurring event 'regular-chaostreff-2026' should be present", monthlyEvent)
+        assertTrue(
+            "Monthly event should have RRULE with BYSETPOS=1,3,4,5",
+            monthlyEvent!!.rRules.any { it.value.contains("BYSETPOS=1,3,4,5") }
+        )
+
+        // Monthly recurring event with BYSETPOS=2 (Chaosupdate 2026)
+        val chaosupdateEvent = eventsByUid["chaosupdate-2026"]
+        assertNotNull("Monthly recurring event 'chaosupdate-2026' should be present", chaosupdateEvent)
+        assertTrue(
+            "Chaosupdate event should have RRULE with BYSETPOS=2",
+            chaosupdateEvent!!.rRules.any { it.value.contains("BYSETPOS=2") }
+        )
     }
 
     @Test
